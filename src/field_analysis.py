@@ -49,7 +49,7 @@ PROJECT_ROOT = "/Users/wange/Coding/Python/fieldanalysis"
 
 # You will manually put in field filename (can be absolute path, or relative to PROJECT_ROOT).
 # If no suffix is given, ".dat" is assumed.
-FIELD_FILE = "data/03032026_wien.dat"  # examples: "data/field1", "/abs/path/to/field1.dat"
+FIELD_FILE = "data/03032026_t commitwien.dat"  # examples: "data/field1", "/abs/path/to/field1.dat"
 
 # Analysis parameters (direct mode defaults)
 X0 = 0.0
