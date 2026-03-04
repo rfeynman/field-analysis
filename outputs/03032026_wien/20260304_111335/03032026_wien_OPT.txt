@@ -1,0 +1,38 @@
+=== 2D Electric Field Multipole Analysis (Ex,Ey) ===
+Input file: /Users/wange/Coding/Python/fieldanalysis/data/03032026_wien.dat
+
+Definition / convention used:
+  w = (x - x0) + i (y - y0)
+  F = Ex - i Ey
+  F(w) = Σ_{n>=1} Cn * w^(n-1)
+  n=1 dipole, n=2 quadrupole, n=3 sextupole, n=4 octupole
+
+Units:
+  Ex,Ey: V/m
+  w^(n-1): m^(n-1)
+  => Cn: V/m^n
+  => |Cn| * r_ref^(n-1): V/m  (field amplitude scale at radius r_ref)
+
+Center used: x0 = 0 m, y0 = 0 m
+Angular samples on circle: M = 512
+nmax: 4
+Radii used (m): 0.01
+r_ref for normalized amplitude (m): 0.01
+
+Multipole coefficients:
+  Columns:
+    n  name        Re(Cn)        Im(Cn)        |Cn|         phase(rad)   |Cn|*r_ref^(n-1)
+    -  ----        ------        ------        ----         ----------   ----------------
+    1  dipole      +0.00000000e+00  +1.43975780e+06  1.43975780e+06  +1.57079633  1.43975780e+06
+    2  quadrupole  -7.32480314e+01  -5.82076609e-09  7.32480314e+01  -3.14159265  7.32480314e-01
+    3  sextupole   -2.91038305e-07  -1.12422515e+07  1.12422515e+07  -1.57079633  1.12422515e+03
+    4  octupole    +1.02093882e+06  -7.27595761e-05  1.02093882e+06  -0.00000000  1.02093882e+00
+
+Total |E| map threshold-circle radii (peak deviation in annulus):
+  Deviation definition: d(r) = max_annulus | |E(r,θ)| - E0 | / E0
+  where E0 = |E| at nearest grid point to (x0,y0).
+  E0 = 1.43975755e+06 V/m
+  Center grid index used: ix0=30, iy0=30
+  0.2% : r = 1.52500000e-02 m
+  0.5% : r = 2.22500000e-02 m
+  1% : r = 2.82500000e-02 m

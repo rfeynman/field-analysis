@@ -1,88 +1,88 @@
 #!/usr/bin/env python3
 """
-multipole_2d.py
+fieldanalysis multipole tool (2D Ex/Ey)
 
-2D electric-field multipole extraction (dipole/quadrupole/sextupole/octupole)
-from Ex(x,y), Ey(x,y) on a rectangular grid.
+Improvements implemented (per your requests):
+1) No plt.show(); figures are only saved.
+2) No auto-detect project root. You set PROJECT_ROOT as an absolute path string.
+   You set FIELD_FILE manually; default suffix is ".dat" if not provided.
+3) The 0.2/0.5/1% dashed circles are drawn ONLY on total_Emag.png (not on other maps),
+   and use different colors.
+4) All map plots use cmap="bwr".
+5) Each run creates outputs/<field_stem>/<run_stamp>/ and saves everything there.
+6) Creates two 2D output data files for 1D cuts:
+     <field_stem>_x.dat  (cut at y≈y0)
+     <field_stem>_y.dat  (cut at x≈x0)
+   Each includes total + multipole components.
+7) Creates <field_stem>_OPT.txt containing:
+   - multipole definitions
+   - center, radii
+   - n=1..4: Cn, |Cn|, phase
+   - 0.2%, 0.5%, 1% radii info from total |E| map
 
-Project layout (recommended):
-  project/
-    data/field.dat      # or field.npz (true numpy npz archive)
-    src/multipole_2d.py
+Input formats supported:
+- Text table (.dat/.txt/.csv) with header columns: X Y Ex Ey
+  (units: m, m, V/m, V/m)
+- True NumPy .npz (zip) with arrays X,Y,Ex,Ey or x,y,Ex,Ey (optional)
 
-Your field.dat format (text table):
-  Header line:   X    Y    Ex    Ey
-  Units:         m    m    V/m   V/m
-  Data:          tab/space delimited, scientific notation allowed
-
-Conventions used here:
+Multipole convention used:
   w = (x-x0) + i (y-y0)
-  F(w) = Ex - i Ey = sum_{n>=1} Cn * w^(n-1)
-
-So:
-  n=1 dipole    (constant field)
-  n=2 quadrupole
-  n=3 sextupole
-  n=4 octupole
-  ...
-
-Extraction method:
-  Sample F(θ)=Ex - i Ey on a circle of radius r about (x0,y0)
-  Cn ≈ (1/(M r^(n-1))) Σ_k F(θ_k) exp(-i(n-1)θ_k)
-
-Outputs:
-  - Prints Cn
-  - Saves component maps (Ex and Ey) for each order and total field
-  - Saves 1D cuts along x (y=y0) and y (x=x0)
-  - Outputs go to project_root/outputs/ by default
-
-Two run modes:
-  mode=1 (default): command line parsing
-  mode=0: direct mode; edit config dict inside main()
-
-Usage examples:
-  # From project root:
-  python src/multipole_2d.py --x0 0 --y0 0 --r 0.01 --nmax 4 --out test --show
-
-  # Explicit input:
-  python src/multipole_2d.py --npz data/field.dat --x0 0 --y0 0 --rmin 0.005 --rmax 0.015 --nr 7 --out test
+  F = Ex - i Ey = Σ_{n>=1} Cn * w^(n-1)
+  n=1 dipole, n=2 quadrupole, n=3 sextupole, n=4 octupole
 """
 
+from __future__ import annotations
+
 import argparse
-from pathlib import Path
 import zipfile
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 
 
-# ----------------------------
-# Paths (project layout helpers)
-# ----------------------------
-def get_project_paths(default_data_name: str = "field.dat") -> dict:
-    """
-    Assumes this script lives in project_root/src/.
-    Returns paths dict including default input in project_root/data/.
-    """
-    script_path = Path(__file__).resolve()
-    script_dir = script_path.parent
-    project_root = script_dir.parent
-    data_dir = project_root / "data"
-    out_dir = project_root / "outputs"
-    default_input = data_dir / default_data_name
-    return {
-        "script_path": script_path,
-        "script_dir": script_dir,
-        "project_root": project_root,
-        "data_dir": data_dir,
-        "out_dir": out_dir,
-        "default_input": default_input,
-    }
+# =============================================================================
+# USER SETTINGS (DIRECT MODE)
+# =============================================================================
+PROJECT_ROOT = "/Users/wange/Coding/Python/fieldanalysis"
+
+# You will manually put in field filename (can be absolute path, or relative to PROJECT_ROOT).
+# If no suffix is given, ".dat" is assumed.
+FIELD_FILE = "data/03032026_wien.dat"  # examples: "data/field1", "/abs/path/to/field1.dat"
+
+# Analysis parameters (direct mode defaults)
+X0 = 0.0
+Y0 = 0.0
+# Choose either single radius:
+R_SINGLE = 0.029
+# Or multi-radius (set R_SINGLE=None and set rmin/rmax):
+RMIN = None
+RMAX = None
+NR = 5
+
+M_THETA = 512
+NMAX = 4  # up to octupole by default
+SAVE_DPI = 200
+
+# Threshold circles on total |E| map:
+THRESHOLDS = (0.002, 0.005, 0.01)  # 0.2%, 0.5%, 1.0%
+CIRCLE_COLORS = ("gold", "lime", "cyan")  # distinct colors for the 3 circles
 
 
-# ----------------------------
-# Data loading
-# ----------------------------
-def load_field_any(path):
+# =============================================================================
+# DATA LOADING
+# =============================================================================
+def resolve_input_path(project_root: str, field_file: str, default_suffix: str = ".dat") -> Path:
+    p = Path(field_file).expanduser()
+    if not p.is_absolute():
+        p = Path(project_root).expanduser().resolve() / p
+    if p.suffix == "":
+        p = p.with_suffix(default_suffix)
+    return p.resolve()
+
+
+def load_field_any(path: str | Path):
     """
     Load either:
       - text table file (.dat/.txt/.csv) with header columns: X Y Ex Ey
@@ -95,7 +95,7 @@ def load_field_any(path):
     if not p.is_file():
         raise FileNotFoundError(f"Cannot find field file: {p}")
 
-    # True .npz archive support (optional)
+    # True npz support (optional)
     if p.suffix.lower() == ".npz" and zipfile.is_zipfile(p):
         data = np.load(p)
         keys = {k.lower(): k for k in data.files}
@@ -110,18 +110,15 @@ def load_field_any(path):
         Y = pick("y", "Y")
         Ex = pick("ex", "Ex", "EX")
         Ey = pick("ey", "Ey", "EY")
-
         if X is None or Y is None or Ex is None or Ey is None:
             raise ValueError(f"NPZ missing required arrays. Found keys: {data.files}")
 
-        # 1D axes + 2D fields
         if X.ndim == 1 and Y.ndim == 1:
             x, y = X, Y
             if Ex.shape != (y.size, x.size) or Ey.shape != (y.size, x.size):
                 raise ValueError(f"Expected Ex/Ey shape (ny,nx)={(y.size,x.size)}, got {Ex.shape}, {Ey.shape}")
             return x, y, Ex, Ey
 
-        # 2D meshgrid + 2D fields
         if X.ndim == 2 and Y.ndim == 2:
             x = np.unique(X[0, :])
             y = np.unique(Y[:, 0])
@@ -131,13 +128,10 @@ def load_field_any(path):
 
         raise ValueError("Unsupported NPZ shapes for X,Y. Use 1D axes or 2D grids.")
 
-    # Text table case (your field.dat)
+    # Text table case
     arr = np.genfromtxt(p, delimiter=None, names=True, dtype=float, encoding=None)
-
     if arr.dtype.names is None:
-        raise ValueError(
-            "Could not read header. Ensure first line contains column names like: X  Y  Ex  Ey"
-        )
+        raise ValueError("Could not read header. Ensure first line has: X  Y  Ex  Ey")
 
     col = {n.lower(): n for n in arr.dtype.names}
 
@@ -167,28 +161,23 @@ def load_field_any(path):
     Ex[iy, ix] = Exc
     Ey[iy, ix] = Eyc
 
-    # Require complete rectangular grid for this version
     if np.isnan(Ex).any() or np.isnan(Ey).any():
         missing = int(np.isnan(Ex).sum() + np.isnan(Ey).sum())
         raise ValueError(
             f"Data is not a complete rectangular grid (missing {missing} values). "
-            "If your sampling is irregular, tell me and I’ll switch to scattered interpolation."
+            "If sampling is irregular, we can switch to scattered interpolation."
         )
 
     return x, y, Ex, Ey
 
 
-# ----------------------------
-# Grid + bilinear interpolation
-# ----------------------------
+# =============================================================================
+# INTERPOLATION + MULTIPOLE
+# =============================================================================
 def bilinear_interp(x1d, y1d, F2d, xq, yq):
     """
-    Bilinear interpolation for a regular tensor grid:
-      x1d shape (nx,), y1d shape (ny,)
-      F2d shape (ny, nx) with indexing F2d[jy, ix] = F(y1d[jy], x1d[ix])
-    xq,yq can be arrays (same shape).
-    Returns interpolated values with same shape as xq.
-    Points outside grid are set to NaN.
+    Bilinear interpolation for regular tensor grid.
+    F2d is indexed as F2d[jy, ix] = F(y[jy], x[ix]).
     """
     x1d = np.asarray(x1d)
     y1d = np.asarray(y1d)
@@ -196,11 +185,11 @@ def bilinear_interp(x1d, y1d, F2d, xq, yq):
     xq = np.asarray(xq)
     yq = np.asarray(yq)
 
-    nx = x1d.size
-    ny = y1d.size
-
     if not (np.all(np.diff(x1d) > 0) and np.all(np.diff(y1d) > 0)):
         raise ValueError("x and y arrays must be strictly increasing for bilinear interpolation.")
+
+    nx = x1d.size
+    ny = y1d.size
 
     ix = np.searchsorted(x1d, xq) - 1
     iy = np.searchsorted(y1d, yq) - 1
@@ -228,9 +217,6 @@ def bilinear_interp(x1d, y1d, F2d, xq, yq):
     return fq
 
 
-# ----------------------------
-# Multipole extraction
-# ----------------------------
 def sample_circle(x1d, y1d, Ex, Ey, x0, y0, r, M):
     theta = np.linspace(0.0, 2.0 * np.pi, M, endpoint=False)
     xs = x0 + r * np.cos(theta)
@@ -239,18 +225,13 @@ def sample_circle(x1d, y1d, Ex, Ey, x0, y0, r, M):
     Exs = bilinear_interp(x1d, y1d, Ex, xs, ys)
     Eys = bilinear_interp(x1d, y1d, Ey, xs, ys)
 
-    # Complex field per convention: F = Ex - i Ey
-    F = Exs - 1j * Eys
+    F = Exs - 1j * Eys  # convention
     return theta, F
 
 
 def compute_Cn_on_radius(theta, Ftheta, r, nmax):
-    """
-    Cn = (1/(2pi r^(n-1))) ∫ F(θ) e^{-i(n-1)θ} dθ
-    Discrete uniform θ: Cn ≈ (1/(M r^(n-1))) Σ F_k e^{-i(n-1)θ_k}
-    """
     M = theta.size
-    C = np.zeros(nmax, dtype=complex)  # index 0 corresponds to n=1
+    C = np.zeros(nmax, dtype=complex)
     for n in range(1, nmax + 1):
         k = n - 1
         C[n - 1] = (1.0 / (M * (r ** k))) * np.nansum(Ftheta * np.exp(-1j * k * theta))
@@ -261,23 +242,15 @@ def compute_Cn_multiradius(x1d, y1d, Ex, Ey, x0, y0, radii, M, nmax):
     Call = []
     for r in radii:
         theta, F = sample_circle(x1d, y1d, Ex, Ey, x0, y0, r, M)
-        C = compute_Cn_on_radius(theta, F, r, nmax)
-        Call.append(C)
-    Call = np.vstack(Call)  # (nr, nmax)
+        Call.append(compute_Cn_on_radius(theta, F, r, nmax))
+    Call = np.vstack(Call)
     Cavg = np.nanmean(Call, axis=0)
     return Cavg, Call
 
 
-# ----------------------------
-# Field reconstruction
-# ----------------------------
 def reconstruct_order_field(xg, yg, x0, y0, Cn, n):
-    """
-    Build Ex_n(x,y), Ey_n(x,y) for a single order n using:
-      F_n = Ex_n - i Ey_n = Cn * w^(n-1), w = (x-x0) + i(y-y0)
-    """
     w = (xg - x0) + 1j * (yg - y0)
-    Fn = Cn * (w ** (n - 1))
+    Fn = Cn * (w ** (n - 1))      # Fn = Ex - i Ey
     Exn = np.real(Fn)
     Eyn = -np.imag(Fn)
     return Exn, Eyn
@@ -288,232 +261,534 @@ def nearest_index(arr, val):
     return int(np.argmin(np.abs(arr - val)))
 
 
-# ----------------------------
-# Plot helpers
-# ----------------------------
-def plot_component_maps(x1d, y1d, Exn, Eyn, title_prefix, out_prefix=None):
-    extent = [x1d[0], x1d[-1], y1d[0], y1d[-1]]
-
+# =============================================================================
+# PLOTTING (SAVE ONLY)
+# =============================================================================
+def _save_imshow(data2d, extent, title, xlabel, ylabel, cbar_label, out_path: Path, symmetric=False):
     fig, ax = plt.subplots()
-    im = ax.imshow(Exn, origin="lower", extent=extent, aspect="auto")
-    ax.set_title(f"{title_prefix}: Ex")
-    ax.set_xlabel("x (m)")
-    ax.set_ylabel("y (m)")
-    plt.colorbar(im, ax=ax, label="Ex (V/m)")
-    if out_prefix:
-        fig.savefig(f"{out_prefix}_Ex.png", dpi=200, bbox_inches="tight")
+    if symmetric:
+        vmax = float(np.nanmax(np.abs(data2d)))
+        vmin = -vmax
+    else:
+        vmin, vmax = None, None
 
-    fig, ax = plt.subplots()
-    im = ax.imshow(Eyn, origin="lower", extent=extent, aspect="auto")
-    ax.set_title(f"{title_prefix}: Ey")
-    ax.set_xlabel("x (m)")
-    ax.set_ylabel("y (m)")
-    plt.colorbar(im, ax=ax, label="Ey (V/m)")
-    if out_prefix:
-        fig.savefig(f"{out_prefix}_Ey.png", dpi=200, bbox_inches="tight")
+    im = ax.imshow(
+        data2d,
+        origin="lower",
+        extent=extent,
+        aspect="auto",
+        cmap="bwr",
+        vmin=vmin,
+        vmax=vmax,
+    )
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    plt.colorbar(im, ax=ax, label=cbar_label)
+    fig.savefig(out_path, dpi=SAVE_DPI, bbox_inches="tight")
+    plt.close(fig)
 
 
-def plot_1d_cuts(x1d, y1d, Ex_total, Ey_total, comps, x0, y0, out_prefix=None):
+def compute_threshold_radii_peak_annulus(
+    x1d, y1d, Emag, x0, y0, thresholds=(0.002, 0.005, 0.01)
+):
+    """
+    Peak (worst-case) deviation in annulus:
+      d(r) = max_{points in annulus} | |E| - E0 | / E0
+    Return dict threshold->radius (or None).
+    """
+    x1d = np.asarray(x1d)
+    y1d = np.asarray(y1d)
+    Xg, Yg = np.meshgrid(x1d, y1d)
+    R = np.sqrt((Xg - x0) ** 2 + (Yg - y0) ** 2)
+
     ix0 = nearest_index(x1d, x0)
     iy0 = nearest_index(y1d, y0)
+    E0 = float(Emag[iy0, ix0])
 
-    # Along x (y=y0)
-    fig, ax = plt.subplots()
-    ax.plot(x1d, Ex_total[iy0, :], label="Total Ex")
+    if E0 <= 0 or not np.isfinite(E0):
+        return {"E0": E0, "ix0": ix0, "iy0": iy0, "radii": {t: None for t in thresholds}}
+
+    rel = np.abs(Emag - E0) / E0
+
+    dx = float(np.min(np.diff(x1d)))
+    dy = float(np.min(np.diff(y1d)))
+    dr = 0.5 * min(dx, dy)
+
+    rmax = float(np.nanmax(R))
+    rbins = np.arange(0.0, rmax + dr, dr)
+    r_centers = 0.5 * (rbins[:-1] + rbins[1:])
+
+    d_r = np.full_like(r_centers, np.nan, dtype=float)
+    for i in range(r_centers.size):
+        rlo, rhi = rbins[i], rbins[i + 1]
+        mask = (R >= rlo) & (R < rhi)
+        if np.any(mask):
+            d_r[i] = float(np.nanmax(rel[mask]))
+
+    radii = {}
+    for t in thresholds:
+        idx = np.where(d_r >= t)[0]
+        radii[t] = None if idx.size == 0 else float(r_centers[idx[0]])
+
+    return {"E0": E0, "ix0": ix0, "iy0": iy0, "radii": radii}
+
+
+def plot_component_maps_save_only(
+    x1d, y1d, Ex2d, Ey2d, title_prefix: str, out_base: Path,
+    save_emag: bool = True,
+    overlay_threshold_circles: bool = False,
+    x0: float | None = None,
+    y0: float | None = None,
+    thresholds=(0.002, 0.005, 0.01),
+    circle_colors=("gold", "lime", "cyan"),
+):
+    """
+    Saves Ex, Ey, and optionally |E| maps.
+    Threshold circles are drawn ONLY if overlay_threshold_circles=True.
+    Returns threshold_radii_info (dict) if circles computed, else None.
+    """
+    extent = [x1d[0], x1d[-1], y1d[0], y1d[-1]]
+
+    _save_imshow(
+        Ex2d, extent,
+        title=f"{title_prefix}: Ex",
+        xlabel="x (m)", ylabel="y (m)",
+        cbar_label="Ex (V/m)",
+        out_path=Path(str(out_base) + "_Ex.png"),
+        symmetric=True
+    )
+    _save_imshow(
+        Ey2d, extent,
+        title=f"{title_prefix}: Ey",
+        xlabel="x (m)", ylabel="y (m)",
+        cbar_label="Ey (V/m)",
+        out_path=Path(str(out_base) + "_Ey.png"),
+        symmetric=True
+    )
+
+    info = None
+    if save_emag:
+        Emag = np.sqrt(Ex2d**2 + Ey2d**2)
+
+        # Save magnitude map (with optional circles)
+        fig, ax = plt.subplots()
+        im = ax.imshow(
+            Emag, origin="lower", extent=extent, aspect="auto",
+            cmap="bwr"  # requested even for magnitude
+        )
+        ax.set_title(f"{title_prefix}: |E| = sqrt(Ex^2 + Ey^2)")
+        ax.set_xlabel("x (m)")
+        ax.set_ylabel("y (m)")
+        plt.colorbar(im, ax=ax, label="|E| (V/m)")
+
+        if overlay_threshold_circles and (x0 is not None) and (y0 is not None):
+            info = compute_threshold_radii_peak_annulus(x1d, y1d, Emag, x0, y0, thresholds=thresholds)
+
+            # mark the exact grid point used for E0
+            ix0 = info["ix0"]
+            iy0 = info["iy0"]
+            ax.plot([x1d[ix0]], [y1d[iy0]], marker="o", markersize=4, color="k")
+
+            # circles
+            for (t, c) in zip(thresholds, circle_colors):
+                rt = info["radii"].get(t, None)
+                if rt is None:
+                    continue
+                circ = plt.Circle((x0, y0), rt, fill=False, linestyle="--", linewidth=1.8, color=c)
+                ax.add_patch(circ)
+                ax.text(x0 + rt, y0, f"{100*t:.3g}%", va="bottom", ha="left", color=c)
+
+        fig.savefig(Path(str(out_base) + "_Emag.png"), dpi=SAVE_DPI, bbox_inches="tight")
+        plt.close(fig)
+
+    return info
+
+
+# =============================================================================
+# OUTPUT FILES
+# =============================================================================
+
+
+def write_cuts_files_and_figures(run_dir: Path, stem: str, x, y, x0, y0, Ex_total, Ey_total, comps):
+    """
+    Create:
+      - stem_x.dat: cut along x at y≈y0
+      - stem_y.dat: cut along y at x≈x0
+    And 1D figures:
+      - stem_cut_x_Ex.png, stem_cut_x_Ey.png
+      - stem_cut_y_Ex.png, stem_cut_y_Ey.png
+
+    comps: list of dicts {name, Ex, Ey} where name is dipole/quadrupole/sextupole/octupole
+    """
+    ix0 = nearest_index(x, x0)
+    iy0 = nearest_index(y, y0)
+
+    # -------------------------
+    # Along x (y ≈ y0)
+    # -------------------------
+    xline = x
+    Ex_tot_x = Ex_total[iy0, :]
+    Ey_tot_x = Ey_total[iy0, :]
+
+    data_x = [xline, Ex_tot_x, Ey_tot_x]
+    header_x = ["x(m)", "Ex_total(V/m)", "Ey_total(V/m)"]
+
     for c in comps:
-        ax.plot(x1d, c["Ex"][iy0, :], label=c["name"])
-    ax.set_title(f"1D cut along x at y≈{y1d[iy0]:.6g} m: Ex")
+        data_x.append(c["Ex"][iy0, :])
+        data_x.append(c["Ey"][iy0, :])
+        header_x.append(f"Ex_{c['name']}(V/m)")
+        header_x.append(f"Ey_{c['name']}(V/m)")
+
+    A = np.column_stack(data_x)
+    out_x = run_dir / f"{stem}_x.dat"
+    np.savetxt(out_x, A, header="  ".join(header_x), comments="")
+
+    # 1D figure: Ex along x
+    fig, ax = plt.subplots()
+    ax.plot(xline, Ex_tot_x, label="Total")
+    for c in comps:
+        ax.plot(xline, c["Ex"][iy0, :], label=c["name"])
+    ax.set_title(f"Ex along x at y≈{y[iy0]:.6g} m")
     ax.set_xlabel("x (m)")
     ax.set_ylabel("Ex (V/m)")
     ax.legend()
-    if out_prefix:
-        fig.savefig(f"{out_prefix}_cut_x_Ex.png", dpi=200, bbox_inches="tight")
+    fig.savefig(run_dir / f"{stem}_cut_x_Ex.png", dpi=SAVE_DPI, bbox_inches="tight")
+    plt.close(fig)
 
+    # 1D figure: Ey along x
     fig, ax = plt.subplots()
-    ax.plot(x1d, Ey_total[iy0, :], label="Total Ey")
+    ax.plot(xline, Ey_tot_x, label="Total")
     for c in comps:
-        ax.plot(x1d, c["Ey"][iy0, :], label=c["name"])
-    ax.set_title(f"1D cut along x at y≈{y1d[iy0]:.6g} m: Ey")
+        ax.plot(xline, c["Ey"][iy0, :], label=c["name"])
+    ax.set_title(f"Ey along x at y≈{y[iy0]:.6g} m")
     ax.set_xlabel("x (m)")
     ax.set_ylabel("Ey (V/m)")
     ax.legend()
-    if out_prefix:
-        fig.savefig(f"{out_prefix}_cut_x_Ey.png", dpi=200, bbox_inches="tight")
+    fig.savefig(run_dir / f"{stem}_cut_x_Ey.png", dpi=SAVE_DPI, bbox_inches="tight")
+    plt.close(fig)
 
-    # Along y (x=x0)
-    fig, ax = plt.subplots()
-    ax.plot(y1d, Ex_total[:, ix0], label="Total Ex")
+    # -------------------------
+    # Along y (x ≈ x0)
+    # -------------------------
+    yline = y
+    Ex_tot_y = Ex_total[:, ix0]
+    Ey_tot_y = Ey_total[:, ix0]
+
+    data_y = [yline, Ex_tot_y, Ey_tot_y]
+    header_y = ["y(m)", "Ex_total(V/m)", "Ey_total(V/m)"]
+
     for c in comps:
-        ax.plot(y1d, c["Ex"][:, ix0], label=c["name"])
-    ax.set_title(f"1D cut along y at x≈{x1d[ix0]:.6g} m: Ex")
+        data_y.append(c["Ex"][:, ix0])
+        data_y.append(c["Ey"][:, ix0])
+        header_y.append(f"Ex_{c['name']}(V/m)")
+        header_y.append(f"Ey_{c['name']}(V/m)")
+
+    B = np.column_stack(data_y)
+    out_y = run_dir / f"{stem}_y.dat"
+    np.savetxt(out_y, B, header="  ".join(header_y), comments="")
+
+    # 1D figure: Ex along y
+    fig, ax = plt.subplots()
+    ax.plot(yline, Ex_tot_y, label="Total")
+    for c in comps:
+        ax.plot(yline, c["Ex"][:, ix0], label=c["name"])
+    ax.set_title(f"Ex along y at x≈{x[ix0]:.6g} m")
     ax.set_xlabel("y (m)")
     ax.set_ylabel("Ex (V/m)")
     ax.legend()
-    if out_prefix:
-        fig.savefig(f"{out_prefix}_cut_y_Ex.png", dpi=200, bbox_inches="tight")
+    fig.savefig(run_dir / f"{stem}_cut_y_Ex.png", dpi=SAVE_DPI, bbox_inches="tight")
+    plt.close(fig)
 
+    # 1D figure: Ey along y
     fig, ax = plt.subplots()
-    ax.plot(y1d, Ey_total[:, ix0], label="Total Ey")
+    ax.plot(yline, Ey_tot_y, label="Total")
     for c in comps:
-        ax.plot(y1d, c["Ey"][:, ix0], label=c["name"])
-    ax.set_title(f"1D cut along y at x≈{x1d[ix0]:.6g} m: Ey")
+        ax.plot(yline, c["Ey"][:, ix0], label=c["name"])
+    ax.set_title(f"Ey along y at x≈{x[ix0]:.6g} m")
     ax.set_xlabel("y (m)")
     ax.set_ylabel("Ey (V/m)")
     ax.legend()
-    if out_prefix:
-        fig.savefig(f"{out_prefix}_cut_y_Ey.png", dpi=200, bbox_inches="tight")
+    fig.savefig(run_dir / f"{stem}_cut_y_Ey.png", dpi=SAVE_DPI, bbox_inches="tight")
+    plt.close(fig)
 
+    return {
+        "cut_x_file": str(out_x),
+        "cut_y_file": str(out_y),
+        "x_cut_y_used": float(y[iy0]),
+        "y_cut_x_used": float(x[ix0]),
+        "fig_cut_x_Ex": str(run_dir / f"{stem}_cut_x_Ex.png"),
+        "fig_cut_x_Ey": str(run_dir / f"{stem}_cut_x_Ey.png"),
+        "fig_cut_y_Ex": str(run_dir / f"{stem}_cut_y_Ex.png"),
+        "fig_cut_y_Ey": str(run_dir / f"{stem}_cut_y_Ey.png"),
+    }
 
-# ----------------------------
-# Core run function (shared)
-# ----------------------------
-def run(config):
-    x, y, Ex, Ey = load_field_any(config["input"])
+def write_opt_file(
+    run_dir: Path,
+    stem: str,
+    input_path: Path,
+    x0: float,
+    y0: float,
+    radii: np.ndarray,
+    M: int,
+    nmax: int,
+    Cavg: np.ndarray,
+    threshold_info: dict | None,
+    r_ref: float,
+):
+    """
+    Writes <stem>_OPT.txt into run_dir.
 
-    x0 = float(config["x0"])
-    y0 = float(config["y0"])
-    M = int(config["M"])
-    nmax = int(config["nmax"])
-    out = str(config["out"])
-    show = bool(config["show"])
-
-    # Radii selection
-    if config.get("rmin") is not None and config.get("rmax") is not None:
-        nr = int(config.get("nr", 5))
-        radii = np.linspace(float(config["rmin"]), float(config["rmax"]), nr)
-    elif config.get("r") is not None:
-        radii = np.array([float(config["r"])], dtype=float)
-    else:
-        raise ValueError("Provide either r or (rmin and rmax).")
-
-    # Output directory
-    out_dir = Path(config["out_dir"]).expanduser().resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    # Compute coefficients
-    Cavg, Call = compute_Cn_multiradius(x, y, Ex, Ey, x0, y0, radii, M, nmax)
-
+    Includes:
+      - multipole convention / definitions
+      - center, radii, M, nmax
+      - table of n=1..nmax with: Re(Cn), Im(Cn), |Cn|, phase(rad), |Cn|*r_ref^(n-1)
+      - threshold circle radii (0.2/0.5/1%) from total |E| map
+    """
     names = {1: "dipole", 2: "quadrupole", 3: "sextupole", 4: "octupole"}
-    print("=== Multipole coefficients Cn (F = Ex - i Ey) ===")
-    print(f"Input: {Path(config['input']).expanduser().resolve()}")
-    print(f"Center (x0,y0)=({x0},{y0})")
-    print(f"Radii used: {radii}")
-    for n in range(1, nmax + 1):
+    out_opt = run_dir / f"{stem}_OPT.txt"
+
+    r_ref = float(r_ref)
+
+    lines = []
+    lines.append("=== 2D Electric Field Multipole Analysis (Ex,Ey) ===")
+    lines.append(f"Input file: {input_path}")
+    lines.append("")
+    lines.append("Definition / convention used:")
+    lines.append("  w = (x - x0) + i (y - y0)")
+    lines.append("  F = Ex - i Ey")
+    lines.append("  F(w) = Σ_{n>=1} Cn * w^(n-1)")
+    lines.append("  n=1 dipole, n=2 quadrupole, n=3 sextupole, n=4 octupole")
+    lines.append("")
+    lines.append("Units:")
+    lines.append("  Ex,Ey: V/m")
+    lines.append("  w^(n-1): m^(n-1)")
+    lines.append("  => Cn: V/m^n")
+    lines.append("  => |Cn| * r_ref^(n-1): V/m  (field amplitude scale at radius r_ref)")
+    lines.append("")
+    lines.append(f"Center used: x0 = {x0:.16g} m, y0 = {y0:.16g} m")
+    lines.append(f"Angular samples on circle: M = {int(M)}")
+    lines.append(f"nmax: {int(nmax)}")
+    lines.append(f"Radii used (m): {', '.join([f'{float(r):.16g}' for r in radii])}")
+    lines.append(f"r_ref for normalized amplitude (m): {r_ref:.16g}")
+    lines.append("")
+    lines.append("Multipole coefficients:")
+    lines.append("  Columns:")
+    lines.append("    n  name        Re(Cn)        Im(Cn)        |Cn|         phase(rad)   |Cn|*r_ref^(n-1)")
+    lines.append("    -  ----        ------        ------        ----         ----------   ----------------")
+
+    for n in range(1, int(nmax) + 1):
         cn = Cavg[n - 1]
-        mag = np.abs(cn)
-        ph = np.angle(cn)
+        mag = float(np.abs(cn))
+        ph = float(np.angle(cn))
         nm = names.get(n, f"order{n}")
-        # Units: Cn has units (V/m) / m^(n-1) = V/m^n
-        print(
-            f"n={n:2d} ({nm:10s}): Cn = {cn.real:+.6e} {cn.imag:+.6e}j   "
-            f"|Cn|={mag:.6e}  phase(rad)={ph:+.6f}"
+        norm_amp = mag * (r_ref ** (n - 1))  # units: V/m
+        lines.append(
+            f"    {n:1d}  {nm:10s}  {cn.real:+.8e}  {cn.imag:+.8e}  {mag:.8e}  {ph:+.8f}  {norm_amp:.8e}"
         )
 
-    if radii.size > 1:
-        print("\nRadius-consistency check (Cn per radius):")
-        for ir, r in enumerate(radii):
-            row = Call[ir]
-            row_str = "  ".join([f"n={n}:{row[n-1].real:+.2e}{row[n-1].imag:+.2e}j" for n in range(1, nmax + 1)])
-            print(f"  r={r:.6g}: {row_str}")
+    lines.append("")
+    lines.append("Total |E| map threshold-circle radii (peak deviation in annulus):")
+    lines.append("  Deviation definition: d(r) = max_annulus | |E(r,θ)| - E0 | / E0")
+    lines.append("  where E0 = |E| at nearest grid point to (x0,y0).")
 
-    # Reconstruct and plot
+    if threshold_info is None:
+        lines.append("  (not computed)")
+    else:
+        E0 = threshold_info.get("E0", None)
+        ix0 = threshold_info.get("ix0", None)
+        iy0 = threshold_info.get("iy0", None)
+        lines.append(f"  E0 = {float(E0):.8e} V/m")
+        lines.append(f"  Center grid index used: ix0={ix0}, iy0={iy0}")
+
+        radii_dict = threshold_info.get("radii", {})
+        # Keep ordering 0.2%, 0.5%, 1.0% if present
+        for t in sorted(radii_dict.keys()):
+            rt = radii_dict[t]
+            if rt is None:
+                lines.append(f"  {100*t:.3g}% : not reached within map extent")
+            else:
+                lines.append(f"  {100*t:.3g}% : r = {float(rt):.8e} m")
+
+    out_opt.write_text("\n".join(lines) + "\n")
+    return str(out_opt)
+
+
+# =============================================================================
+# RUN CORE
+# =============================================================================
+@dataclass
+class Config:
+    project_root: str
+    input_file: str
+    x0: float
+    y0: float
+    r: float | None
+    rmin: float | None
+    rmax: float | None
+    nr: int
+    M: int
+    nmax: int
+    thresholds: tuple[float, float, float]
+    circle_colors: tuple[str, str, str]
+
+def run(cfg: Config):
+    # Resolve + load
+    input_path = resolve_input_path(cfg.project_root, cfg.input_file, default_suffix=".dat")
+    x, y, Ex, Ey = load_field_any(input_path)
+
+    # Choose radii
+    if cfg.rmin is not None and cfg.rmax is not None:
+        radii = np.linspace(float(cfg.rmin), float(cfg.rmax), int(cfg.nr))
+    elif cfg.r is not None:
+        radii = np.array([float(cfg.r)], dtype=float)
+    else:
+        raise ValueError("Provide either r (single) or (rmin,rmax).")
+
+    # Reference radius for normalized amplitude column in OPT:
+    # Use R_SINGLE if present, otherwise use RMAX (as you requested).
+    if cfg.r is not None:
+        r_ref = float(cfg.r)
+    elif cfg.rmax is not None:
+        r_ref = float(cfg.rmax)
+    else:
+        # fallback (shouldn't happen if above logic is correct)
+        r_ref = float(radii[-1])
+
+    # Output directory: outputs/<field_stem>/<run_stamp>/
+    stem = input_path.stem
+    run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_root = Path(cfg.project_root).expanduser().resolve() / "outputs" / stem / run_stamp
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    # Compute multipoles
+    Cavg, Call = compute_Cn_multiradius(x, y, Ex, Ey, cfg.x0, cfg.y0, radii, cfg.M, cfg.nmax)
+
+    names = {1: "dipole", 2: "quadrupole", 3: "sextupole", 4: "octupole"}
     Xg, Yg = np.meshgrid(x, y)
+
     comps = []
-    for n in range(1, nmax + 1):
+    for n in range(1, cfg.nmax + 1):
         cn = Cavg[n - 1]
-        Exn, Eyn = reconstruct_order_field(Xg, Yg, x0, y0, cn, n)
+        Exn, Eyn = reconstruct_order_field(Xg, Yg, cfg.x0, cfg.y0, cn, n)
         nm = names.get(n, f"order{n}")
         comps.append({"n": n, "name": nm, "Ex": Exn, "Ey": Eyn})
 
-        base = out_dir / f"{out}_{nm}"
-        plot_component_maps(x, y, Exn, Eyn, f"{nm} (n={n})", out_prefix=str(base))
+        # Save component maps (Ex/Ey/Emag) without threshold circles
+        base = out_root / f"{stem}_{nm}"
+        plot_component_maps_save_only(
+            x, y, Exn, Eyn,
+            title_prefix=f"{nm} (n={n})",
+            out_base=base,
+            save_emag=True,
+            overlay_threshold_circles=False,
+            x0=cfg.x0, y0=cfg.y0
+        )
 
-    # Total maps + 1D cuts
-    plot_component_maps(x, y, Ex, Ey, "Total field", out_prefix=str(out_dir / f"{out}_total"))
-    plot_1d_cuts(x, y, Ex, Ey, comps, x0, y0, out_prefix=str(out_dir / out))
+    # Save total maps with threshold circles ONLY on total Emag
+    total_base = out_root / f"{stem}_total"
+    threshold_info = plot_component_maps_save_only(
+        x, y, Ex, Ey,
+        title_prefix="Total field",
+        out_base=total_base,
+        save_emag=True,
+        overlay_threshold_circles=True,
+        x0=cfg.x0, y0=cfg.y0,
+        thresholds=cfg.thresholds,
+        circle_colors=cfg.circle_colors
+    )
 
-    if show:
-        plt.show()
+    # 1D cuts files + 1D figures
+    cuts_info = write_cuts_files_and_figures(
+        out_root, stem, x, y, cfg.x0, cfg.y0,
+        Ex, Ey, comps
+    )
 
+    # OPT report file (now includes normalized amplitude using r_ref)
+    opt_file = write_opt_file(
+        out_root,
+        stem,
+        input_path,
+        cfg.x0,
+        cfg.y0,
+        radii,
+        cfg.M,
+        cfg.nmax,
+        Cavg,
+        threshold_info=threshold_info,
+        r_ref=r_ref,   # <-- key line: pass the reference radius in
+    )
 
-# ----------------------------
-# Main with two modes
-# ----------------------------
-def main(mode=1):
+    # Short terminal summary
+    print(f"Saved outputs to: {out_root}")
+    print(f"  OPT:  {opt_file}")
+    print(f"  Cuts: {cuts_info['cut_x_file']}  {cuts_info['cut_y_file']}")
+    print(f"  1D figs: {cuts_info['fig_cut_x_Ex']}  {cuts_info['fig_cut_x_Ey']}  "
+          f"{cuts_info['fig_cut_y_Ex']}  {cuts_info['fig_cut_y_Ey']}")
+    if threshold_info is not None:
+        for t, rt in threshold_info["radii"].items():
+            print(f"  {100*t:.3g}% radius: {rt}")
+
+# =============================================================================
+# MAIN: CLI mode OR DIRECT mode
+# =============================================================================
+def main(mode=0):
     """
-    mode=1: command/CLI mode (parse argparse)
-    mode=0: direct mode (set config dict here and run)
+    mode=0: DIRECT mode (uses the variables at top of file)
+    mode=1: CLI mode
     """
-    paths = get_project_paths(default_data_name="field.dat")
-
     if mode == 1:
         p = argparse.ArgumentParser()
-        p.add_argument(
-            "--input",
-            default=str(paths["default_input"]),
-            help=f"Field file path (default: {paths['default_input']}). "
-                 f"Supports text table (X Y Ex Ey) or true .npz archive."
-        )
-        p.add_argument("--x0", type=float, required=True, help="Reference center x0 (m)")
-        p.add_argument("--y0", type=float, required=True, help="Reference center y0 (m)")
-
-        # Either single radius:
-        p.add_argument("--r", type=float, default=None, help="Circle radius for extraction (m), single radius.")
-        # Or multiple radii:
-        p.add_argument("--rmin", type=float, default=None, help="Use multiple radii: rmin..rmax (m).")
-        p.add_argument("--rmax", type=float, default=None, help="Use multiple radii: rmin..rmax (m).")
-        p.add_argument("--nr", type=int, default=5, help="Number of radii if using rmin/rmax.")
-
-        p.add_argument("--M", type=int, default=512, help="Number of angular samples on circle.")
-        p.add_argument("--nmax", type=int, default=4, help="Max order n to compute (4=octupole).")
-
-        p.add_argument("--out", type=str, default="multipole", help="Output prefix for saved figures.")
-        p.add_argument(
-            "--out_dir",
-            type=str,
-            default=str(paths["out_dir"]),
-            help=f"Output directory for figures (default: {paths['out_dir']})",
-        )
-        p.add_argument("--show", action="store_true", help="Show plots interactively.")
+        p.add_argument("--project_root", type=str, required=True, help="Absolute path to project root")
+        p.add_argument("--input", type=str, required=True, help="Field file path (absolute or relative to project_root)")
+        p.add_argument("--x0", type=float, required=True)
+        p.add_argument("--y0", type=float, required=True)
+        p.add_argument("--r", type=float, default=None)
+        p.add_argument("--rmin", type=float, default=None)
+        p.add_argument("--rmax", type=float, default=None)
+        p.add_argument("--nr", type=int, default=5)
+        p.add_argument("--M", type=int, default=512)
+        p.add_argument("--nmax", type=int, default=4)
         args = p.parse_args()
-        run(vars(args))
 
-    elif mode == 0:
-        # -------------------------
-        # DIRECT MODE: EDIT HERE
-        # -------------------------
-        config = {
-            "input": str(paths["default_input"]),  # project_root/data/field.dat
-            "x0": 0.0,
-            "y0": 0.0,
+        cfg = Config(
+            project_root=args.project_root,
+            input_file=args.input,
+            x0=args.x0,
+            y0=args.y0,
+            r=args.r,
+            rmin=args.rmin,
+            rmax=args.rmax,
+            nr=args.nr,
+            M=args.M,
+            nmax=args.nmax,
+            thresholds=THRESHOLDS,
+            circle_colors=CIRCLE_COLORS,
+        )
+        run(cfg)
+        return
 
-            # Choose ONE:
-            "r": 0.03,         # single radius (m)
-            "rmin": None,
-            "rmax": None,
-            "nr": 5,
-
-            # Multi-radius example:
-            # "r": None,
-            # "rmin": 0.005,
-            # "rmax": 0.015,
-            # "nr": 7,
-
-            "M": 512,
-            "nmax": 4,
-
-            "out": "myrun",
-            "out_dir": str(paths["out_dir"]),
-            "show": True,
-        }
-        run(config)
-
-    else:
-        raise ValueError("mode must be 0 (direct) or 1 (command/CLI).")
+    # DIRECT mode
+    cfg = Config(
+        project_root=PROJECT_ROOT,
+        input_file=FIELD_FILE,
+        x0=X0,
+        y0=Y0,
+        r=R_SINGLE,
+        rmin=RMIN,
+        rmax=RMAX,
+        nr=NR,
+        M=M_THETA,
+        nmax=NMAX,
+        thresholds=THRESHOLDS,
+        circle_colors=CIRCLE_COLORS,
+    )
+    run(cfg)
 
 
 if __name__ == "__main__":
-    # Default: CLI mode
+    # Default: direct mode (edit variables at top)
     main(mode=0)
-    # For direct mode, switch to:
-    # main(mode=0)
+
+    # If you want CLI mode instead, switch to:
+    # main(mode=1)
