@@ -27,16 +27,16 @@ import gmsh
 class SolveConfig:
     Vt: float = 60000.0
     Vb: float = -60000.0
-    Lx: float = 0.25
-    Ly: float = 0.25
-    thick: float = 0.01
+    #Lx: float = 0.25
+    # Ly: float = 0.25
+    thick: float = 0.016
     st: float = 0.035
     max_cell_area: float = 2e-5
     boundary_h_factor: float = 0.33
-    xmin: float = -0.10
-    xmax: float = 0.10
-    ymin: float = -0.10
-    ymax: float = 0.10
+    xmin: float = -0.107
+    xmax: float = 0.107
+    ymin: float = -0.129
+    ymax: float = 0.129
     n_sample: int = 160
     roi: float = 0.03
     debug_plots: bool = True
@@ -125,7 +125,13 @@ def _build_mesh_gmsh(top_poly, bot_poly, cfg):
     gmsh.model.add("conformal")
     occ = gmsh.model.occ
 
-    outer = occ.addRectangle(-cfg.Lx, -cfg.Ly, 0, 2*cfg.Lx, 2*cfg.Ly)
+    # Outer simulation boundary (metal box at phi=0)
+    # NOTE: this boundary is treated as a grounded conductor via Dirichlet BC.
+    width = float(cfg.xmax - cfg.xmin)
+    height = float(cfg.ymax - cfg.ymin)
+    if width <= 0 or height <= 0:
+        raise ValueError('Invalid bounds: require xmax>xmin and ymax>ymin')
+    outer = occ.addRectangle(cfg.xmin, cfg.ymin, 0, width, height)
     
     def add_occ_poly(poly):
         c = np.asarray(poly.exterior.coords)
@@ -160,8 +166,16 @@ def _build_mesh_gmsh(top_poly, bot_poly, cfg):
     t_mask = np.array([top_poly.boundary.distance(Point(p)) < 1e-7 for p in pts])
     b_mask = np.array([bot_poly.boundary.distance(Point(p)) < 1e-7 for p in pts])
     
+    # Grounded outer boundary node mask (xmin/xmax/ymin/ymax)
+    # Tolerance chosen to be robust to meshing floating point noise.
+    tol = max(1e-10, 1e-8 * max(abs(cfg.xmax - cfg.xmin), abs(cfg.ymax - cfg.ymin)))
+    bd_mask = (
+        (np.abs(pts[:, 0] - cfg.xmin) <= tol) | (np.abs(pts[:, 0] - cfg.xmax) <= tol) |
+        (np.abs(pts[:, 1] - cfg.ymin) <= tol) | (np.abs(pts[:, 1] - cfg.ymax) <= tol)
+    )
+
     gmsh.finalize()
-    return pts, triangles, t_mask, b_mask
+    return pts, triangles, t_mask, b_mask, bd_mask
 
 # -----------------------------
 # Visualization
@@ -187,6 +201,65 @@ def plot_field(xi, yi, data, title, label, savepath):
     ax.set_title(title)
     ax.set_xlabel("x [m]")
     ax.set_ylabel("y [m]")
+    fig.tight_layout()
+    fig.savefig(savepath)
+    plt.close(fig)
+
+def plot_phi_contour(xi, yi, phi_grid, title, label, savepath, n_levels=60):
+    """Contour plot for potential (phi).
+
+    Uses filled contours so equipotential structure is visible and consistent with MATLAB/Mathematica-style plots.
+    """
+    Xg, Yg = np.meshgrid(xi, yi)
+    fig, ax = plt.subplots(figsize=(7, 6), dpi=200)
+    cs = ax.contourf(Xg, Yg, phi_grid, levels=n_levels)
+    fig.colorbar(cs, ax=ax, label=label)
+    # Optional thin contour lines for readability
+    ax.contour(Xg, Yg, phi_grid, levels=max(10, n_levels//6), linewidths=0.4)
+    ax.set_title(title)
+    ax.set_xlabel('x [m]')
+    ax.set_ylabel('y [m]')
+    ax.set_aspect('equal')
+    fig.tight_layout()
+    fig.savefig(savepath)
+    plt.close(fig)
+
+
+def plot_emag_with_vectors(xi, yi, Ex_grid, Ey_grid, air_mask_grid, title, label, savepath, stride=None):
+    """Field magnitude density map with E-field direction overlay (VectorDensityPlot-like).
+
+    - Background: |E|
+    - Overlay: streamlines from (Ex,Ey)
+    """
+    Xg, Yg = np.meshgrid(xi, yi)
+    Emag = np.sqrt(Ex_grid**2 + Ey_grid**2)
+    # Avoid stream artifacts in masked regions
+    Exp = np.where(air_mask_grid, Ex_grid, 0.0)
+    Eyp = np.where(air_mask_grid, Ey_grid, 0.0)
+
+    fig, ax = plt.subplots(figsize=(7, 6), dpi=200)
+    im = ax.imshow(Emag, origin='lower', extent=[xi[0], xi[-1], yi[0], yi[-1]],
+                   aspect='equal', interpolation='bicubic', cmap='magma')
+    fig.colorbar(im, ax=ax, label=label)
+
+    # Downsample for streamline density control
+    if stride is None:
+        # Keep roughly <= 60 vectors across the plot in each direction
+        stride = max(1, int(len(xi) / 60))
+
+    xs = Xg[::stride, ::stride]
+    ys = Yg[::stride, ::stride]
+    us = Exp[::stride, ::stride]
+    vs = Eyp[::stride, ::stride]
+
+    # Streamplot gives a VectorDensityPlot-like look (direction + density).
+    # Use a small linewidth so it doesn't overpower the |E| heatmap.
+    ax.streamplot(xs, ys, us, vs, density=1.2, linewidth=0.6, arrowsize=0.8)
+
+    ax.set_title(title)
+    ax.set_xlabel('x [m]')
+    ax.set_ylabel('y [m]')
+    ax.set_aspect('equal')
     fig.tight_layout()
     fig.savefig(savepath)
     plt.close(fig)
@@ -253,17 +326,22 @@ def run_simulation(cfg: SolveConfig = SolveConfig()):
     os.makedirs(cfg.outdir, exist_ok=True)
     
     # 1. Geometry
-    params = [((0.06, 0.042), 0.003, cfg.ed-0.042), 
-              ((0.06, 0.025), 0.005, 0.005), 
-              ((0.052, 0.025), 0.005, 0.005), 
-              ((0.045, 0.032), 0.003, 0.003)]
+    e1_y0=0.042
+    e1_x0, e1_a, e1_b= 0.06, 0.003, cfg.ed-e1_y0
+    e2_x0, e2_y0, e2_a, e2_b= 0.06, 0.028, 0.005, 0.005
+    e3_x0, e3_y0, e3_a, e3_b= 0.042, 0.028, 0.005, 0.005
+    e4_x0, e4_y0, e4_a, e4_b= 0.045, 0.032, 0.003, 0.003
+    params = [((e1_x0, e1_y0), e1_a, e1_b),
+              ((e2_x0, e2_y0), e2_a, e2_b),
+              ((e3_x0, e3_y0), e3_a, e3_b),
+              ((e4_x0, e4_y0), e4_a, e4_b)]
     
     top = generate_electrode(params, cfg.st, cfg.ed)
     bot = shp_scale(top, 1.0, -1.0, origin=(0, 0))
     metal = unary_union([top, bot])
     
     # 2. Meshing
-    pts, tris, t_m, b_m = _build_mesh_gmsh(top, bot, cfg)
+    pts, tris, t_m, b_m, bd_m = _build_mesh_gmsh(top, bot, cfg)
     
     if cfg.debug_plots:
         plot_mesh_wireframe(pts, tris, top, bot, cfg, os.path.join(cfg.outdir, "mesh_wireframe.png"))
@@ -291,8 +369,10 @@ def run_simulation(cfg: SolveConfig = SolveConfig()):
     K = K.tocsr()
 
     # 4. Dirichlet Solve
-    dir_mask = t_m | b_m
-    dir_vals = np.zeros(n)
+    # Electrode surfaces are fixed at Vt/Vb, and the outer rectangle boundary is grounded (phi=0).
+    dir_mask = t_m | b_m | bd_m
+    dir_vals = np.zeros(n)  # default: grounded
+    # Apply electrode potentials (override if any node happens to coincide with the boundary).
     dir_vals[t_m] = cfg.Vt
     dir_vals[b_m] = cfg.Vb
     
@@ -337,8 +417,8 @@ def run_simulation(cfg: SolveConfig = SolveConfig()):
     max_result, vals_small = sample_and_outputs(xi, yi, Ex_grid, Ey_grid, air_mask_grid, cfg)
 
     if cfg.debug_plots:
-        plot_field(xi, yi, phi_grid, "Electric Potential (phi)", "Potential [V]", os.path.join(cfg.outdir, "phi_map.png"))
-        plot_field(xi, yi, np.sqrt(Ex_grid**2 + Ey_grid**2), "Field Magnitude |E|", "|E| [V/m]", os.path.join(cfg.outdir, "emag_density.png"))
+        plot_phi_contour(xi, yi, phi_grid, "Electric Potential (phi)", "Potential [V]", os.path.join(cfg.outdir, "phi_map.png"))
+        plot_emag_with_vectors(xi, yi, Ex_grid, Ey_grid, air_mask_grid, "Field Magnitude |E| with E-direction", "|E| [V/m]", os.path.join(cfg.outdir, "emag_density.png"))
 
     print(f"Simulation Finished. Max |E| = {max_result[2]:.2e} V/m at {max_result[0:2]}")
     return max_result, vals_small
