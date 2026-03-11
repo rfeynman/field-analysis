@@ -24,6 +24,8 @@ Edit the USER SETTINGS section as needed.
 
 from __future__ import annotations
 
+import argparse
+from typing import Optional
 import numpy as np
 
 # -----------------------------------------------------------------------------
@@ -54,7 +56,11 @@ UNIFORMITY_TARGET = 0.005
 # -----------------------------------------------------------------------------
 
 def _vals_small_to_grid(vals_small: np.ndarray):
-    """Convert flattened [x,y,Ex,Ey] samples into (x1d,y1d,Ex2d,Ey2d)."""
+    """Convert flattened [x,y,Ex,Ey] samples into (x1d,y1d,Ex2d,Ey2d).
+
+    This matches the strict rectangular-grid expectation used in field_analysis.py:
+    if any (x,y) grid point is missing, raise an error (no silent zero-fill).
+    """
     vals_small = np.asarray(vals_small, dtype=float)
     if vals_small.ndim != 2 or vals_small.shape[1] != 4:
         raise ValueError("vals_small must be an (N,4) array: [x,y,Ex,Ey].")
@@ -66,10 +72,17 @@ def _vals_small_to_grid(vals_small: np.ndarray):
     ix = np.searchsorted(x, vals_small[:, 0])
     iy = np.searchsorted(y, vals_small[:, 1])
 
-    Ex = np.zeros((ny, nx), dtype=float)
-    Ey = np.zeros((ny, nx), dtype=float)
+    Ex = np.full((ny, nx), np.nan, dtype=float)
+    Ey = np.full((ny, nx), np.nan, dtype=float)
     Ex[iy, ix] = vals_small[:, 2]
     Ey[iy, ix] = vals_small[:, 3]
+
+    if np.isnan(Ex).any() or np.isnan(Ey).any():
+        missing = int(np.isnan(Ex).sum() + np.isnan(Ey).sum())
+        raise ValueError(
+            f"Data is not a complete rectangular grid (missing {missing} values). "
+            "If sampling is irregular, we can switch to scattered interpolation."
+        )
 
     return x, y, Ex, Ey
 
@@ -147,9 +160,17 @@ def _compute_Cn_on_radius(theta, Ftheta, r, nmax):
 
 
 def _uniformity_radius(x1d, y1d, Ex2d, Ey2d, x0, y0, target=0.005):
-    """Return r where d(r) first exceeds `target` (0.005 = 0.5%).
+    """Return the *first* radius where peak annulus deviation reaches/exceeds `target`.
 
-    d(r) is evaluated on annuli with thickness dr ~ grid spacing.
+    This matches field_analysis.py (compute_threshold_radii_peak_annulus):
+      - E0 is taken at the grid point nearest (x0,y0)
+      - rel(x,y) = | |E| - E0 | / E0
+      - annulus bins: [rlo, rhi) with dr = 0.5 * min(dx, dy)
+      - d(r) = max_{points in annulus} rel
+      - return r_center of the first annulus where d(r) >= target
+
+    Returns:
+        float radius (bin center) or None if the threshold is never reached.
     """
     x1d = np.asarray(x1d)
     y1d = np.asarray(y1d)
@@ -164,32 +185,31 @@ def _uniformity_radius(x1d, y1d, Ex2d, Ey2d, x0, y0, target=0.005):
     iy0 = int(np.argmin(np.abs(y1d - y0)))
     E0 = float(Emag[iy0, ix0])
 
-    if not np.isfinite(E0) or E0 <= 0.0:
-        # Fallback: average in a tiny disk
-        r_small = max(np.min(np.diff(x1d)), np.min(np.diff(y1d)))
-        m0 = R <= 1.5 * r_small
-        E0 = float(np.nanmean(Emag[m0]))
-        if not np.isfinite(E0) or E0 <= 0.0:
-            return 0.0
+    if E0 <= 0.0 or (not np.isfinite(E0)):
+        return None
 
-    dr = float(min(np.min(np.diff(x1d)), np.min(np.diff(y1d))))
+    rel = np.abs(Emag - E0) / E0
+
+    dx = float(np.min(np.diff(x1d)))
+    dy = float(np.min(np.diff(y1d)))
+    dr = 0.5 * min(dx, dy)
+
     rmax = float(np.nanmax(R))
+    rbins = np.arange(0.0, rmax + dr, dr)
+    if rbins.size < 2:
+        return None
 
-    # Scan radii from 0 outward.
-    r_centers = np.arange(0.0, rmax + 0.5 * dr, dr)
-    last_ok = 0.0
+    r_centers = 0.5 * (rbins[:-1] + rbins[1:])
 
-    for r in r_centers:
-        ann = (R >= (r - 0.5 * dr)) & (R < (r + 0.5 * dr))
-        if not np.any(ann):
-            continue
-        dev = float(np.nanmax(np.abs(Emag[ann] - E0)) / E0)
-        if np.isfinite(dev) and dev <= target:
-            last_ok = float(r)
-        elif np.isfinite(dev) and dev > target:
-            break
+    d_r = np.full_like(r_centers, np.nan, dtype=float)
+    for i in range(r_centers.size):
+        rlo, rhi = rbins[i], rbins[i + 1]
+        mask = (R >= rlo) & (R < rhi)
+        if np.any(mask):
+            d_r[i] = float(np.nanmax(rel[mask]))
 
-    return last_ok
+    idx = np.where(d_r >= target)[0]
+    return None if idx.size == 0 else float(r_centers[idx[0]])
 
 
 def _multipole_name(n: int) -> str:
@@ -217,6 +237,7 @@ def run_analysis(
     r_ref: float = R_REF,
     M: int = M_THETA,
     uniformity_target: float = UNIFORMITY_TARGET,
+    geom_yaml: Optional[str] = None,
 ):
     """Run electrodes_field.py, compute multipoles, print the table.
 
@@ -233,7 +254,7 @@ def run_analysis(
 
     # Run the field solver and get vals_small.
     sim_cfg = SolveConfig(debug_plots=False, writefile=False)
-    _max_result, vals_small = run_simulation(sim_cfg)
+    _max_result, vals_small = run_simulation(sim_cfg, geom_yaml=geom_yaml)
 
     x1d, y1d, Ex2d, Ey2d = _vals_small_to_grid(vals_small)
 
@@ -258,18 +279,41 @@ def run_analysis(
     amp = np.abs(Cn) * (float(r_ref) ** (n_arr - 1))
     sum_high = float(np.sum(amp[n_arr > 2]))
 
-    # Uniformity radius for target (default 0.005)
-    r_uni = float(_uniformity_radius(x1d, y1d, Ex2d, Ey2d, x0, y0, target=float(uniformity_target)))
+    # Uniformity radius: first annulus where d(r) >= uniformity_target
+    r_uni = _uniformity_radius(x1d, y1d, Ex2d, Ey2d, x0, y0, target=float(uniformity_target))
 
     print("")
-    print(f"Sum_{'{'}n>2{'}'} |Cn|*r_ref^(n-1) = {sum_high:.8e}  (V/m)")
-    print(f"Uniformity radius for d(r) <= {uniformity_target:g} : r = {r_uni:.8e} m")
+    print(f"Sum_{{n>2}} |Cn|*r_ref^(n-1) = {sum_high:.8e}  (V/m)")
+    if r_uni is None:
+        print(f"Uniformity threshold d(r) >= {uniformity_target:g} was NOT reached within the grid extent.")
+    else:
+        print(f"Uniformity radius (first annulus where d(r) >= {uniformity_target:g}) : r = {r_uni:.8e} m")
 
     return sum_high, r_uni
-
-
 def main():
-    run_analysis()
+    ap = argparse.ArgumentParser(
+        description=(
+            "Run multipole analysis using fields from electrodes_field.py. "
+            "Geometry (e1..e4) can be provided via YAML."
+        )
+    )
+    ap.add_argument(
+        "geom_yaml",
+        nargs="?",
+        default=None,
+        help="Path to YAML file defining electrode geometry (e1..e4).",
+    )
+    ap.add_argument(
+        "--geom-yaml",
+        "-g",
+        dest="geom_yaml_flag",
+        default=None,
+        help="Same as positional geom_yaml; provided for convenience.",
+    )
+    args = ap.parse_args()
+
+    geom_yaml = args.geom_yaml_flag if args.geom_yaml_flag is not None else args.geom_yaml
+    run_analysis(geom_yaml=geom_yaml)
 
 
 if __name__ == "__main__":

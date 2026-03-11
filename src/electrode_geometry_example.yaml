@@ -1,0 +1,30 @@
+# Example geometry YAML for electrodes_field.py
+# Units: meters
+
+# You may either put e1..e4 at the top-level, or under `electrode_geometry:`.
+
+electrode_geometry:
+  e1:
+    x0: 0.06
+    y0: 0.042
+    a: 0.003
+    # NOTE: e1_b is NOT read from YAML.
+    # It is computed as: e1_b = (st + thick) - e1.y0
+
+  e2:
+    x0: 0.06
+    y0: 0.032
+    a: 0.003
+    b: 0.003
+
+  e3:
+    x0: 0.045
+    y0: 0.032
+    a: 0.003
+    b: 0.003
+
+  e4:
+    x0: 0.038
+    y0: 0.034
+    a: 0.002
+    b: 0.002
