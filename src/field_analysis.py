@@ -1,34 +1,132 @@
 #!/usr/bin/env python3
 """
-fieldanalysis multipole tool (2D Ex/Ey)
+field_analysis.py — 2D Electric-Field Multipole Analysis (Ex/Ey)
 
-Improvements implemented (per your requests):
-1) No plt.show(); figures are only saved.
-2) No auto-detect project root. You set PROJECT_ROOT as an absolute path string.
-   You set FIELD_FILE manually; default suffix is ".dat" if not provided.
-3) The 0.2/0.5/1% dashed circles are drawn ONLY on total_Emag.png (not on other maps),
-   and use different colors.
-4) All map plots use cmap="bwr".
-5) Each run creates outputs/<field_stem>/<run_stamp>/ and saves everything there.
-6) Creates two 2D output data files for 1D cuts:
-     <field_stem>_x.dat  (cut at y≈y0)
-     <field_stem>_y.dat  (cut at x≈x0)
-   Each includes total + multipole components.
-7) Creates <field_stem>_OPT.txt containing:
-   - multipole definitions
-   - center, radii
-   - n=1..4: Cn, |Cn|, phase
-   - 0.2%, 0.5%, 1% radii info from total |E| map
+Author: Erdong Wang
+Mar.07 2026
 
-Input formats supported:
-- Text table (.dat/.txt/.csv) with header columns: X Y Ex Ey
-  (units: m, m, V/m, V/m)
-- True NumPy .npz (zip) with arrays X,Y,Ex,Ey or x,y,Ex,Ey (optional)
+Description
 
-Multipole convention used:
-  w = (x-x0) + i (y-y0)
-  F = Ex - i Ey = Σ_{n>=1} Cn * w^(n-1)
-  n=1 dipole, n=2 quadrupole, n=3 sextupole, n=4 octupole
+This script reads a 2D transverse electric-field map (Ex, Ey) on a rectangular grid
+and decomposes the field into complex multipole components (dipole, quadrupole,
+sextupole, octupole, ...). It also generates 2D field maps, 1D cuts, and a text
+report summarizing the multipole coefficients and field-uniformity radii.
+
+------------------------------------------------------------------------------
+INPUT
+------------------------------------------------------------------------------
+The input field file must contain columns (with a header line):
+
+    X   Y   Ex   Ey
+
+Units are assumed to be:
+    X, Y : meters (m)
+    Ex, Ey : volts per meter (V/m)
+
+Supported formats:
+1) Text table: .dat / .txt / .csv
+   - whitespace or delimiter-separated
+   - first line must include column names: X Y Ex Ey
+
+2) NumPy .npz (optional)
+   - must contain arrays X,Y,Ex,Ey (or x,y,Ex,Ey)
+   - X,Y can be 1D axes with Ex/Ey shaped (ny,nx), or 2D meshgrids.
+
+------------------------------------------------------------------------------
+OUTPUTS
+------------------------------------------------------------------------------
+For each run, results are written under:
+
+    <PROJECT_ROOT>/outputs/<field_stem>/<timestamp>/
+
+Files generated include:
+- 2D maps (PNG):
+    <field_stem>_total_Ex.png, <field_stem>_total_Ey.png, <field_stem>_total_Emag.png
+    <field_stem>_<order>_Ex.png, <field_stem>_<order>_Ey.png, <field_stem>_<order>_Emag.png
+  where <order> is dipole/quadrupole/sextupole/octupole/... up to NMAX.
+  NOTE: Only the total |E| map includes the dashed 0.2%, 0.5%, 1% uniformity circles.
+
+- 1D cut data (text):
+    <field_stem>_x.dat   (cut along x at y≈Y0)
+    <field_stem>_y.dat   (cut along y at x≈X0)
+  Each file contains total Ex/Ey and per-multipole Ex/Ey along that cut.
+
+- 1D cut figures (PNG):
+    <field_stem>_cut_x_Ex.png, <field_stem>_cut_x_Ey.png
+    <field_stem>_cut_y_Ex.png, <field_stem>_cut_y_Ey.png
+
+- Report file:
+    <field_stem>_OPT.txt
+  This report includes:
+    - the multipole convention definition
+    - center (X0,Y0), radii used, and sampling parameters
+    - a table of Cn (Re/Im), |Cn|, phase, and normalized amplitude |Cn|*r_ref^(n-1)
+    - 0.2%, 0.5%, 1% uniformity radii extracted from the total |E| map
+
+------------------------------------------------------------------------------
+MULTIPOLE CONVENTION (used by this script)
+------------------------------------------------------------------------------
+Define:
+    w = (x - x0) + i (y - y0)
+    F = Ex - i Ey
+
+Expansion:
+    F(w) = Σ_{n>=1} Cn * w^(n-1)
+
+Interpretation:
+    n=1  dipole       (uniform field)
+    n=2  quadrupole   (linear gradient)
+    n=3  sextupole    (quadratic nonlinearity)
+    n=4  octupole     (cubic nonlinearity)
+    ...
+
+Cn are computed by sampling F on a circle of radius r around (x0,y0) and taking
+the Fourier coefficient of harmonic (n-1), then dividing by r^(n-1). If multiple
+radii are provided, Cn are computed on each radius and averaged.
+
+------------------------------------------------------------------------------
+HOW TO RUN
+------------------------------------------------------------------------------
+Two ways to run:
+
+A) Direct mode (default)
+   1) Edit the variables in the "USER SETTINGS (DIRECT MODE)" section:
+        PROJECT_ROOT   absolute project path
+        FIELD_FILE     input field filename (relative to PROJECT_ROOT or absolute)
+        X0, Y0         analysis center (m)
+        R_SINGLE       single analysis radius (m)
+          or set R_SINGLE=None and use RMIN/RMAX/NR for multi-radius averaging
+        M_THETA        number of angular samples on the circle
+        NMAX           maximum multipole order to compute
+   2) Run:
+        python field_analysis.py
+
+B) Command-line mode
+   1) At the bottom of the file, change:
+        main(mode=0)
+      to:
+        main(mode=1)
+   2) Run, for example:
+        python field_analysis.py \
+          --project_root "/Users/wange/Coding/Python/fieldanalysis" \
+          --input "data/03122026_wien.dat" \
+          --x0 0.0 --y0 0.0 \
+          --r 0.029 \
+          --M 512 --nmax 10
+
+   Or multi-radius:
+        python field_analysis.py \
+          --project_root "/Users/wange/Coding/Python/fieldanalysis" \
+          --input "data/03122026_wien.dat" \
+          --x0 0.0 --y0 0.0 \
+          --rmin 0.020 --rmax 0.030 --nr 7 \
+          --M 512 --nmax 10
+
+------------------------------------------------------------------------------
+NOTES
+------------------------------------------------------------------------------
+- The input data must form a complete rectangular grid; missing points will raise an error.
+- All figures are saved to disk; the script does not display interactive windows.
 """
 
 from __future__ import annotations
@@ -49,7 +147,7 @@ PROJECT_ROOT = "/Users/wange/Coding/Python/fieldanalysis"
 
 # You will manually put in field filename (can be absolute path, or relative to PROJECT_ROOT).
 # If no suffix is given, ".dat" is assumed.
-FIELD_FILE = "data/03032026_wien.dat"  # examples: "data/field1", "/abs/path/to/field1.dat"
+FIELD_FILE = "data/03122026_wien.dat"  # examples: "data/field1", "/abs/path/to/field1.dat"
 
 # Analysis parameters (direct mode defaults)
 X0 = 0.0

@@ -1,25 +1,146 @@
 #!/usr/bin/env python3
-"""electrodes_field_analysis.py
+"""
+electrodes_field_analysis.py
+Author: Erdong Wang
 
-Simplified multipole analysis.
+Simplified 2D multipole analysis for electrode geometry.
 
-- Does NOT read any data files.
-- Runs electrodes_field.py to obtain `vals_small` (columns: x, y, Ex, Ey).
-- Computes 2D multipole coefficients Cn using the convention:
+This script runs the field solver (electrodes_field.py), extracts the
+transverse electric field (Ex, Ey), and computes complex multipole
+coefficients Cn using circular Fourier analysis.
 
-    w = (x-x0) + i (y-y0)
-    F = Ex - i Ey = sum_{n>=1} Cn * w^(n-1)
+---------------------------------------------------------------------------
+WHAT THIS SCRIPT DOES
+---------------------------------------------------------------------------
 
-- Prints the table:
+1) Calls electrodes_field.py to generate the electric field map.
+2) Converts the returned vals_small array into a strict rectangular grid.
+3) Computes 2D multipole coefficients Cn using:
 
-    n  name        Re(Cn)        Im(Cn)        |Cn|         phase(rad)   |Cn|*r_ref^(n-1)
+       w = (x - x0) + i (y - y0)
+       F = Ex - i Ey
+       F(w) = Σ_{n>=1} Cn * w^(n-1)
 
-- Returns:
-    (1) sum_{n>2} |Cn|*r_ref^(n-1)
-    (2) radius where field uniformity first exceeds 0.005 (0.5%) using
-        d(r) = max_annulus | |E(r,θ)| - E0 | / E0
+4) Prints a multipole table:
 
-Edit the USER SETTINGS section as needed.
+       n  name        Re(Cn)        Im(Cn)        |Cn|         phase(rad)   |Cn|*r_ref^(n-1)
+
+5) Returns two quantities:
+
+       (1) Sum_{n>2} |Cn| * r_ref^(n-1)
+           (Total higher-order field amplitude at r_ref)
+
+       (2) Uniformity radius:
+           The first radius where the peak annulus deviation satisfies
+
+               d(r) = max_annulus | |E| - E0 | / E0  >= UNIFORMITY_TARGET
+
+---------------------------------------------------------------------------
+INPUT
+---------------------------------------------------------------------------
+
+This script does NOT read field data files directly.
+
+Instead, it runs:
+
+    electrodes_field.py
+
+which generates vals_small = [x, y, Ex, Ey].
+
+Optional input:
+
+    geom_yaml
+
+Path to a YAML file defining electrode geometry (e1..e4).
+This file is passed directly to electrodes_field.py.
+
+Geometry can be provided either:
+
+    python electrodes_field_analysis.py geometry.yaml
+
+or
+
+    python electrodes_field_analysis.py --geom-yaml geometry.yaml
+
+    python electrodes_field_analysis.py --geom-yaml geometry.yaml
+If no YAML file is given, the default geometry in electrodes_field.py is used.
+
+---------------------------------------------------------------------------
+USER SETTINGS (edit inside the script)
+---------------------------------------------------------------------------
+
+X0, Y0
+    Multipole expansion center (meters)
+
+R_REF
+    Reference radius (meters) used for:
+        - sampling the extraction circle
+        - computing |Cn|*r_ref^(n-1)
+
+M_THETA
+    Number of angular samples around the circle
+
+NMAX
+    Maximum multipole order to compute
+
+UNIFORMITY_TARGET
+    Field uniformity threshold (dimensionless)
+    Example:
+        0.005  →  0.5%
+
+---------------------------------------------------------------------------
+OUTPUT
+---------------------------------------------------------------------------
+
+Console output only.
+
+The script prints:
+
+1) A formatted multipole table:
+
+       n  name  Re(Cn)  Im(Cn)  |Cn|  phase(rad)  |Cn|*r_ref^(n-1)
+
+2) The total higher-order field magnitude:
+
+       Sum_{n>2} |Cn|*r_ref^(n-1)
+
+3) The uniformity radius:
+
+       r where d(r) >= UNIFORMITY_TARGET
+
+These outputs are parsed by the CMA-ES optimizer script.
+
+---------------------------------------------------------------------------
+MATHEMATICAL BACKGROUND
+---------------------------------------------------------------------------
+
+On a circle of radius r_ref:
+
+    F(θ) = Ex(r,θ) - i Ey(r,θ)
+
+The multipole coefficient is computed via discrete Fourier projection:
+
+    Cn = (1 / (2π r_ref^(n-1))) ∫ F(θ) e^{-i(n-1)θ} dθ
+
+In discrete form:
+
+    Cn ≈ (1 / (M r_ref^(n-1))) Σ F(θ_k) e^{-i(n-1)θ_k}
+
+where θ_k = 2π k / M.
+
+Higher-order components (n > 2) represent nonlinear field errors
+(sextupole, octupole, etc.).
+
+---------------------------------------------------------------------------
+NOTES
+---------------------------------------------------------------------------
+
+- The field must form a complete rectangular grid.
+- Missing grid points will raise an error.
+- This script is designed to be called by optimization drivers,
+  but can also be run independently for analysis.
+
+---------------------------------------------------------------------------
 """
 
 from __future__ import annotations
@@ -277,7 +398,7 @@ def run_analysis(
     # Sum higher orders (n > 2)
     n_arr = np.arange(1, int(nmax) + 1)
     amp = np.abs(Cn) * (float(r_ref) ** (n_arr - 1))
-    sum_high = float(np.sum(amp[n_arr > 2]))
+    sum_high = float(np.sum(amp[n_arr > 1]))
 
     # Uniformity radius: first annulus where d(r) >= uniformity_target
     r_uni = _uniformity_radius(x1d, y1d, Ex2d, Ey2d, x0, y0, target=float(uniformity_target))

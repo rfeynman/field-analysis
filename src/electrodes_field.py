@@ -1,3 +1,124 @@
+"""
+electrodes_field.py — 2D Electrostatic FEM Solver for Wien Filter Electrodes
+
+Author: Erdong Wang
+
+This script performs a 2D finite-element electrostatic simulation of a
+two-electrode system defined by a smooth tangent/ellipse geometry.
+
+It solves Laplace’s equation:
+
+    ∇²φ = 0
+
+with Dirichlet boundary conditions:
+    - Top electrode:  φ = +Vt
+    - Bottom electrode: φ = Vb
+    - Outer rectangular boundary: φ = 0 (grounded metal box)
+
+Electric field is computed from:
+
+    E = -∇φ
+
+The script generates:
+    - FEM mesh (via Gmsh)
+    - Potential distribution φ(x,y)
+    - Electric field components Ex, Ey
+    - Field magnitude |E|
+    - Region-of-interest (ROI) data for multipole analysis
+
+------------------------------------------------------------------------------
+INPUT
+------------------------------------------------------------------------------
+
+Geometry can be provided in two ways:
+
+1) Default built-in geometry (no arguments)
+
+    python electrodes_field.py
+
+2) YAML geometry file (recommended)
+
+    python electrodes_field.py --geom-yaml geometry.yaml
+
+The YAML file must define ellipses e1–e4:
+
+    electrode_geometry:
+      e1: {x0: ..., y0: ..., a: ...}
+      e2: {x0: ..., y0: ..., a: ..., b: ...}
+      e3: {x0: ..., y0: ..., a: ..., b: ...}
+      e4: {x0: ..., y0: ..., a: ..., b: ...}
+
+Note:
+    e1_b is automatically computed as:
+        e1_b = cfg.ed - e1_y0
+
+Simulation parameters are controlled in the SolveConfig dataclass:
+    - Vt, Vb                electrode voltages
+    - thick, st             geometric offsets
+    - xmin,xmax,ymin,ymax   outer metal boundary (grounded)
+    - max_cell_area         mesh density
+    - n_sample              grid resolution
+    - roi                   region-of-interest half-width
+    - debug_plots           enable/disable PNG output
+    - writefile             enable/disable text output
+
+------------------------------------------------------------------------------
+OUTPUT
+------------------------------------------------------------------------------
+
+Outputs are written to:
+
+    <cfg.outdir>/
+
+Generated files may include:
+
+    mesh_wireframe.png
+    phi_map.png
+    emag_density.png
+
+If writefile=True:
+    simulation_output.txt
+
+This file contains:
+    Line 1: x_max, y_max, |E|max
+    Line 2: header
+    Remaining lines:
+        x   y   Ex   Ey
+    for all points within |x|,|y| ≤ roi.
+
+The function run_simulation(...) returns:
+
+    max_result   = [x_max, y_max, |E|max]
+    vals_small   = array of [x, y, Ex, Ey] within ROI
+
+These outputs are used by:
+    electrodes_field_analysis.py
+    CMA-ES optimization driver
+
+------------------------------------------------------------------------------
+HOW TO USE AS A MODULE
+------------------------------------------------------------------------------
+
+You can import and run directly:
+
+    from electrodes_field import SolveConfig, run_simulation
+
+    cfg = SolveConfig()
+    max_result, vals_small = run_simulation(cfg, geom_yaml="geometry.yaml")
+
+------------------------------------------------------------------------------
+NOTES
+------------------------------------------------------------------------------
+
+- Mesh generation uses Gmsh.
+- Geometry construction uses Shapely.
+- Linear system solved using SciPy sparse solver.
+- Outer boundary is treated as grounded conductor (φ = 0).
+- Designed for 2D transverse electrostatic field analysis.
+
+------------------------------------------------------------------------------
+"""
+
 import math
 import os
 from dataclasses import dataclass
