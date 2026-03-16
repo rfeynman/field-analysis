@@ -27,7 +27,7 @@ WHAT THIS SCRIPT DOES
 
 5) Returns two quantities:
 
-       (1) Sum_{n>2} |Cn| * r_ref^(n-1)
+       (1) Sum_{n>1} |Cn| * r_ref^(n-1)
            (Total higher-order field amplitude at r_ref)
 
        (2) Uniformity radius:
@@ -366,7 +366,7 @@ def run_analysis(
         (sum_high_orders, r_uniform)
 
     where:
-        sum_high_orders = Σ_{n>2} |Cn| * r_ref^(n-1)
+        sum_high_orders = Σ_{n>1} |Cn| * r_ref^(n-1)
         r_uniform       = radius where uniformity is still <= uniformity_target
     """
 
@@ -395,7 +395,7 @@ def run_analysis(
             f"{n:1d}  {nm:10s}  {cn.real:+.8e}  {cn.imag:+.8e}  {mag:.8e}  {ph:+.8f}  {norm_amp:.8e}"
         )
 
-    # Sum higher orders (n > 2)
+    # Sum higher orders (n > 1)
     n_arr = np.arange(1, int(nmax) + 1)
     amp = np.abs(Cn) * (float(r_ref) ** (n_arr - 1))
     sum_high = float(np.sum(amp[n_arr > 1]))
@@ -404,7 +404,7 @@ def run_analysis(
     r_uni = _uniformity_radius(x1d, y1d, Ex2d, Ey2d, x0, y0, target=float(uniformity_target))
 
     print("")
-    print(f"Sum_{{n>2}} |Cn|*r_ref^(n-1) = {sum_high:.8e}  (V/m)")
+    print(f"Sum_{{n>1}} |Cn|*r_ref^(n-1) = {sum_high:.8e}  (V/m)")
     if r_uni is None:
         print(f"Uniformity threshold d(r) >= {uniformity_target:g} was NOT reached within the grid extent.")
     else:
