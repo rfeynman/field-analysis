@@ -1,5 +1,6 @@
 numpy
+scipy
 matplotlib
 shapely
-scipy
 gmsh
+pyyaml

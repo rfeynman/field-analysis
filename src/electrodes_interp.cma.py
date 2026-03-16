@@ -1,39 +1,99 @@
 #!/usr/bin/env python3
-"""electrodes_interp_cma_gmsh_project_uniformity.py
+"""
+electrodes_interp_cma_gmsh_project_uniformity.py
 
-Interpolation-driven electrode geometry + Gmsh/FEM field solve + multipole analysis + CMA-ES optimization.
+Interpolation-driven electrode geometry + conformal Gmsh/FEM field solve + multipole analysis + CMA-ES optimization.
 
-Project layout (fixed):
+Author: Erdong Wang
+
+Overview
+--------
+This script optimizes the *shape* of a 2D symmetric electrode pair using CMA-ES. The right-half of the
+top electrode is defined by Npoint interpolation control points (x_i, y_i) on the interval [0, x0].
+The full geometry is constructed by symmetry:
+  - Top electrode: right-half curve + mirror across x=0
+  - Bottom electrode: mirror of the top electrode across y=0
+
+For each candidate (set of y_i values), the workflow is:
+  1) Build electrode polygons from interpolation + circle tangency construction.
+  2) Generate a conformal 2D mesh with Gmsh inside a rectangular metal boundary.
+  3) Solve Laplace equation (electrostatics) with FEM:
+       phi = Vt on the top electrode
+       phi = Vb on the bottom electrode
+       phi = 0  on the outer metal box boundary (xmin/xmax/ymin/ymax)
+  4) Interpolate phi, Ex, Ey onto a regular grid, compute:
+       - Max |E| location and value
+       - Uniformity radius (first annulus where relative deviation reaches UNIFORMITY_TARGET)
+       - Multipole/Fourier coefficients Cn on a circle of radius cutrad
+  5) Objective for CMA-ES:
+       sum_high_orders = Σ_{n>1} |Cn| * (cutrad)^(n-1)
+     The optimizer minimizes this objective.
+
+Project paths and outputs
+------------------------
+Project layout is fixed in the script:
   PROJECT_ROOT = /Users/wange/Coding/Python/fieldanalysis
-  Script location: PROJECT_ROOT/src
-  Outputs: PROJECT_ROOT/outputs
+  Script directory: PROJECT_ROOT/src
+  Outputs directory: PROJECT_ROOT/outputs
 
-Best outputs (saved under PROJECT_ROOT/outputs/optruns_YYYYMMDD_HHMMSS/):
-  - best.out.txt
-  - best.points.txt
-  - convergence.png
-  - phi_map.png
-  - mesh_wireframe.png
-  - emag_density.png
-  - best_simulation_output_map.txt
+Each run creates:
+  PROJECT_ROOT/outputs/optruns_YYYYMMDD_HHMMSS/
+    best.out.txt
+    best.points.txt
+    convergence.png
+    phi_map.png
+    mesh_wireframe.png
+    emag_density.png
+    best_simulation_output_map.txt
+    runs/
+      genXXXX_evalYYYYYY_.yaml      # Npoint (x,y) control points for that evaluation
+      genXXXX_evalYYYYYY_out.txt    # per-evaluation report (max field, uniformity, multipoles, objective)
 
-Per-evaluation outputs (saved under RUN_DIR/runs/):
-  - genXXXX_evalYYYYYY_.yaml            (Npoint coordinates)
-  - genXXXX_evalYYYYYY_out.txt         (per-eval report)
+Inputs
+------
+1) Optional YAML config file (recommended) passed via --yaml.
+   Any keys matching SolveConfig fields will override defaults, e.g.:
+     Vt, Vb, thick, st,
+     xmin, xmax, ymin, ymax,
+     max_cell_area, boundary_h_factor,
+     n_sample, roi,
+     Npoint, x0, split_point, mean_range,
+     cutrad, NMAX, M_theta,
+     UNIFORMITY_TARGET,
+     budget, nproc, seed,
+     y_delta_max, outdir_opt
 
-Uniformity:
-  - SolveConfig.UNIFORMITY_TARGET = 0.005
-  - Computes the "Uniformity radius" defined as:
-      first annulus-bin center where d(r) >= UNIFORMITY_TARGET,
-      where d(r) = max_{points in annulus} | |E(x,y)| - |E(0,0)| | / |E(0,0)|
-    using annulus bins dr = 0.5 * min(dx, dy), with dx/dy from the regular grid.
+2) Command-line overrides:
+   --yaml   path/to/config.yaml
+   --budget integer (total objective evaluations)
+   --nproc  integer (parallel processes for evaluations)
+   --seed   integer (random seed for CMA-ES)
 
-Run:
+How to run
+----------
+From PROJECT_ROOT/src:
+
   python electrodes_interp_cma_gmsh_project_uniformity.py --yaml geom.yaml --budget 500 --nproc 8
 
 Notes:
-- Terminal output prints progress: generation, eval/budget, current best objective.
-- Gmsh is initialized/finalized inside each evaluation (safe for multiprocessing).
+- Multiprocessing: each evaluation initializes/finalizes Gmsh inside the worker (safe for nproc>1).
+- Thread control: the script sets common BLAS/OpenMP environment variables to 1 thread per process.
+  Gmsh threads are also limited via General.NumThreads / Mesh.MaxNumThreads*.
+- The interpolation x-coordinates are non-uniformly distributed using split_point:
+    round(Npoint*split_point) points are placed in the first segment (0 .. 0.7*x0),
+    remaining points in (0.7*x0 .. x0], with strict monotonicity for CubicSpline.
+- The CMA-ES starting mean can be perturbed using mean_range (interior points only);
+  endpoints are always pinned to y=st by clamp_y_points().
+
+Outputs interpretation
+----------------------
+- best.out.txt: summary of best solution (max |E|, uniformity radius, Cn table, objective).
+- best.points.txt: (x_i, y_i) control points for the best solution.
+- best_simulation_output_map.txt: ROI samples formatted as:
+    first line: x_max y_max |E|_max
+    then columns: x y Ex Ey  (sorted)
+- convergence.png: best objective value vs evaluation count.
+- phi_map.png / mesh_wireframe.png / emag_density.png: best-solution plots.
 """
 from __future__ import annotations
 import os
