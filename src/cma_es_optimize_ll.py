@@ -13,6 +13,8 @@ python cma_es_optimize.py \
     --budget 500 \
     --nproc 8
 
+the st, thick value has to be changed in the electrodes_field.py this core code. 
+
 ALL ARGUMENTS ARE OPTIONAL.
 
 If omitted, the following defaults are used:
